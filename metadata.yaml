@@ -1,0 +1,8 @@
+name: astrbot_plugin_submit_quotes
+display_name: 投稿语录
+desc: 回复消息发送“投稿”完整收录，发送“语录”从所有会话随机回放。
+version: v1.0.0
+author: 薄暝（上游） / makima（适配）
+repo: https://github.com/MAK1MAAaa/astrbot_plugin_submit_quotes
+support_platforms:
+  - aiocqhttp

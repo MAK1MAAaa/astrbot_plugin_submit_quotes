@@ -1,0 +1,20 @@
+{
+  "download_timeout_seconds": {
+    "description": "单个媒体获取超时（秒）",
+    "type": "int",
+    "default": 20,
+    "hint": "包含媒体直链获取和下载；必须大于 0。超时整条投稿失败。"
+  },
+  "max_file_size_mb": {
+    "description": "单个媒体大小上限（MiB）",
+    "type": "int",
+    "default": 50,
+    "hint": "必须大于 0，超限整条投稿失败。"
+  },
+  "max_submission_size_mb": {
+    "description": "单条投稿媒体总大小上限（MiB）",
+    "type": "int",
+    "default": 100,
+    "hint": "包含合并转发的全部媒体；必须大于 0，超限整条投稿失败。"
+  }
+}
