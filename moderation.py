@@ -34,6 +34,9 @@ MAX_FRAME_BYTES = 12 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 32 * 1024 * 1024
 
 PendingSegment = PendingQuoteSegment | PendingForwardSegment
+CONTENT_REJECTION_CODES = frozenset(
+    {"content_check_rejected", "content_filter", "content_policy_violation"}
+)
 
 
 class ModerationRejected(SubmissionError):
@@ -42,6 +45,76 @@ class ModerationRejected(SubmissionError):
 
 class ModerationUnavailable(SubmissionError):
     """The complete submission could not be confidently reviewed."""
+
+
+def _is_content_error(payload: Any, *, require_envelope: bool = False) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("error"), dict):
+        payload = payload["error"]
+    elif require_envelope:
+        return False
+    code = payload.get("code")
+    return isinstance(code, str) and code.lower() in CONTENT_REJECTION_CODES
+
+
+def _is_content_error_text(raw: str) -> bool:
+    raw = raw.strip()
+    # AstrBot 会将异常的 SSE 响应包成普通 Exception，原始 error 仍在末尾。
+    if raw.startswith("API 返回的 completion 类型错误："):
+        _, separator, raw = raw.partition(": ")
+        if not separator:
+            return False
+        raw = raw.strip()
+    if raw.startswith(("data:", "event:")):
+        candidates = [
+            line.removeprefix("data:").strip()
+            for line in raw.splitlines()
+            if line.startswith("data:")
+        ]
+    else:
+        candidates = [raw]
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # 不在任意异常正文里搜索关键词或 JSON 片段，避免把回显的投稿当成错误码。
+        if _is_content_error(payload, require_envelope=True):
+            return True
+    return False
+
+
+def _provider_rejected_content(error: BaseException) -> bool:
+    pending = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        code = getattr(current, "code", None)
+        if isinstance(code, str) and code.lower() in CONTENT_REJECTION_CODES:
+            return True
+        if _is_content_error(getattr(current, "body", None)):
+            return True
+        response = getattr(current, "response", None)
+        reader = getattr(response, "json", None)
+        if callable(reader):
+            try:
+                if _is_content_error(reader()):
+                    return True
+            except Exception:
+                pass
+        if _is_content_error_text(str(current)):
+            return True
+        # 优先使用显式 cause，避免把已被替换的旧 context 误认为当前拒绝原因。
+        cause = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+        if cause is not None:
+            pending.append(cause)
+    return False
 
 
 def _normalize(value: str) -> str:
@@ -185,6 +258,8 @@ class ContentModerator:
         except (TimeoutError, asyncio.TimeoutError) as exc:
             raise ModerationUnavailable("投稿审查超时，暂未收录") from exc
         except Exception as exc:
+            if _provider_rejected_content(exc):
+                raise ModerationRejected(REJECTED_MESSAGE) from exc
             logger.exception("投稿审查模型调用或临时图片准备失败")
             raise ModerationUnavailable("投稿审查失败，暂未收录，请稍后重试") from exc
 
@@ -341,6 +416,14 @@ class ContentModerator:
     @staticmethod
     def _check_response(response: Any, image_count: int) -> None:
         role = getattr(response, "role", "assistant")
+        if getattr(role, "value", role) in {"err", "error"} or getattr(
+            response, "error", None
+        ):
+            raw = getattr(response, "completion_text", "")
+            if _is_content_error(getattr(response, "error", None)) or (
+                isinstance(raw, str) and _is_content_error_text(raw)
+            ):
+                raise ModerationRejected(REJECTED_MESSAGE)
         if getattr(role, "value", role) in {"err", "error", "tool", "function"} or any(
             getattr(response, field_name, None)
             for field_name in (
