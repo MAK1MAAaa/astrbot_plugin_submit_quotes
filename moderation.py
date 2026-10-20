@@ -464,10 +464,10 @@ class ContentModerator:
             raise ModerationUnavailable("审查模型判定格式无效，暂未收录") from exc
         if not isinstance(decision, dict):
             raise ModerationUnavailable("审查模型判定格式无效，暂未收录")
-        if decision.get("decision") == "reject":
+        if decision.get("decision") in ("reject", "uncertain"):
             raise ModerationRejected(REJECTED_MESSAGE)
         if decision.get("decision") != "allow":
-            raise ModerationUnavailable("审查模型无法确认内容，暂未收录")
+            raise ModerationUnavailable("审查模型判定字段缺失或无效，暂未收录")
         reviewed = decision.get("images_reviewed")
         if type(reviewed) is not int or reviewed != image_count:
             raise ModerationUnavailable("审查模型未确认检查全部图片，暂未收录")

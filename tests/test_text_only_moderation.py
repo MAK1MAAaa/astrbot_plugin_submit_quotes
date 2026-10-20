@@ -309,12 +309,22 @@ class TextOnlyModerationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(str(raised.exception), "不中不中")
 
+    async def test_explicit_uncertain_uses_rejection_in_text_only_scope(self):
+        self.context.llm_generate.return_value.completion_text = (
+            '{"decision":"uncertain"}'
+        )
+        with self.assertRaises(ModerationRejected) as raised:
+            await self.moderator().review(
+                self.event, [text("待审文字"), PendingQuoteSegment(type="image")]
+            )
+        self.assertEqual(str(raised.exception), "不中不中")
+        self.assertEqual(self.context.llm_generate.await_args.kwargs["image_urls"], [])
+
     async def test_allow_protocol_requires_zero_reviewed_images(self):
         for response in (
             '{"decision":"allow","images_reviewed":1}',
             '{"decision":"allow","images_reviewed":true}',
             '{"decision":"allow"}',
-            '{"decision":"uncertain","images_reviewed":0}',
             '{"decision":"allow","decision":"reject","images_reviewed":0}',
             "无法判断",
         ):

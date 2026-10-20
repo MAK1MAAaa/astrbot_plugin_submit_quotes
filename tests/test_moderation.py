@@ -185,6 +185,25 @@ class ModerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(raised.exception), REJECTED_MESSAGE)
         self.assert_paths_cleaned()
 
+    async def test_explicit_uncertain_text_is_rejected_without_image_count(self):
+        for response in (
+            '{"decision":"uncertain"}',
+            '{"decision":"uncertain","images_reviewed":0}',
+        ):
+            self.context.result = response
+            with self.subTest(response=response):
+                with self.assertRaises(ModerationRejected) as raised:
+                    await self.review()
+                self.assertEqual(str(raised.exception), REJECTED_MESSAGE)
+
+    async def test_explicit_uncertain_image_is_rejected_and_cleans_all_frames(self):
+        self.context.result = '{"decision":"uncertain"}'
+        with self.assertRaises(ModerationRejected) as raised:
+            await self.review([image_segment(frame_count=3)])
+        self.assertEqual(str(raised.exception), REJECTED_MESSAGE)
+        self.assertEqual(len(self.context.paths), 3)
+        self.assert_paths_cleaned()
+
     async def test_disabled_skips_everything_even_unknown_media(self):
         moderator = ContentModerator(None, ModerationConfig(enabled=False))
         await moderator.review(self.event, [PendingQuoteSegment(type="unknown")])
@@ -427,7 +446,6 @@ class ModerationTests(unittest.IsolatedAsyncioTestCase):
             "null",
             "true",
             "{}",
-            '{"decision":"uncertain","images_reviewed":0}',
             '{"decision":"ALLOW","images_reviewed":0}',
             '{"decision":"allow"}',
             '{"decision":"allow","images_reviewed":true}',

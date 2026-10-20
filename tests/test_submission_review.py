@@ -203,6 +203,32 @@ class SubmissionReviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.on_message(event)
         self.assert_failed_without_resources(event, rejected=True)
 
+    async def test_uncertain_model_response_rejects_and_cleans_review_images(self):
+        async def uncertain_review(**kwargs):
+            paths = [Path(path) for path in kwargs["image_urls"]]
+            self.assertTrue(paths)
+            self.assertTrue(all(path.is_file() for path in paths))
+            self.review_image_paths.extend(paths)
+            return types.SimpleNamespace(completion_text='{"decision":"uncertain"}')
+
+        self.context.llm_generate.side_effect = uncertain_review
+        event = self.submission(
+            [
+                segment("text", text="待审文字"),
+                segment("image", file=encoded(png_bytes())),
+            ]
+        )
+        await self.plugin.on_message(event)
+        self.assertIsInstance(self.plugin.quote_service.moderator, ContentModerator)
+        self.assert_failed_without_resources(event, rejected=True)
+        self.assertTrue(self.review_image_paths)
+        self.assertTrue(
+            all(
+                not path.exists() and not path.parent.exists()
+                for path in self.review_image_paths
+            )
+        )
+
     async def test_model_failure_after_image_download_does_not_commit(self):
         self.context.llm_generate.side_effect = RuntimeError("模拟模型离线")
         event = self.submission([segment("image", file=encoded(png_bytes()))])
