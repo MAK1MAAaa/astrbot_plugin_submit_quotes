@@ -1,4 +1,13 @@
 {
+  "delete_whitelist": {
+    "description": "允许查看和删除投稿的 QQ 用户 ID 白名单",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "hint": "填写 QQ 号，例如 [\"123456789\"]。默认无人有权删除；白名单用户可按完整 ID 删除所有群聊和私聊中的投稿。"
+  },
   "download_timeout_seconds": {
     "description": "单个媒体获取超时（秒）",
     "type": "int",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import AsyncExitStack
 from pathlib import Path
 from time import time
 from typing import Any
@@ -139,6 +140,63 @@ class QuoteService:
         return batches
 
     async def send_quote(self, event: Any, quote: Quote) -> None:
+        await self._send_quotes(event, [quote], banquet=False)
+
+    async def send_banquet(self, event: Any, quotes: list[Quote]) -> None:
+        if not 6 <= len(quotes) <= 9:
+            raise SubmissionError("摆酒席需要 6～9 条不同投稿")
+        if len({(quote.group, quote.id) for quote in quotes}) != len(quotes):
+            raise SubmissionError("摆酒席不能重复使用同一条投稿")
+        await self._send_quotes(event, quotes, banquet=True)
+
+    async def _send_quotes(
+        self, event: Any, quotes: list[Quote], *, banquet: bool
+    ) -> None:
+        async with AsyncExitStack() as locks:
+            # 固定顺序取锁，且持有到回放完成，避免删除正在发送的媒体。
+            for session in sorted({quote.group for quote in quotes}):
+                await locks.enter_async_context(self.repository.get_store(session).lock)
+            current = {
+                (session, quote.id): quote
+                for session in {quote.group for quote in quotes}
+                for quote in self.repository.list_quotes(session)
+            }
+            actions: list[tuple[str, dict]] = []
+            for index, quote in enumerate(quotes, start=1):
+                saved = current.get((quote.group, quote.id))
+                if saved is None:
+                    raise SubmissionError("投稿已被删除，请重新抽取")
+                label = ("\n" if index > 1 else "") + f"第{index}道菜："
+                prepared = await self._prepare_quote_actions(
+                    event, saved, prefix=label if banquet else ""
+                )
+                for action, payload in prepared:
+                    # 连续普通消息可以一起发送，使纯文字酒席呈现为一条多行消息。
+                    if (
+                        banquet
+                        and actions
+                        and action in {"send_group_msg", "send_private_msg"}
+                        and actions[-1][0] == action
+                        and all(
+                            part["type"] not in {"record", "video", "file"}
+                            for part in actions[-1][1]["message"] + payload["message"]
+                        )
+                    ):
+                        actions[-1][1]["message"].extend(payload["message"])
+                    else:
+                        actions.append((action, payload))
+            # 所有菜品的资源检查和序列化均已完成，再开始发送。
+            for action, payload in actions:
+                response = await event.bot.api.call_action(action, **payload)
+                if isinstance(response, dict) and (
+                    response.get("status") == "failed"
+                    or response.get("retcode", 0) not in (0, "0", None)
+                ):
+                    raise SubmissionError("平台拒绝发送语录，请检查 NapCat 日志")
+
+    async def _prepare_quote_actions(
+        self, event: Any, quote: Quote, *, prefix: str = ""
+    ) -> list[tuple[str, dict]]:
         comp = self.components
         group_id = str(event.get_group_id() or "")
         target_id = group_id or str(event.get_sender_id())
@@ -149,8 +207,13 @@ class QuoteService:
         if self_id:
             target["self_id"] = self_id
         actions: list[tuple[str, dict]] = []
-        # 先完成整条的资源检查和序列化，避免后段转换失败时已发出前段。
-        for batch in self.build_quote_batches(quote):
+        batches = self.build_quote_batches(quote)
+        if prefix:
+            if isinstance(batches[0][0], (comp.Record, comp.Video, comp.File, comp.Nodes)):
+                batches.insert(0, [comp.Plain(prefix)])
+            else:
+                batches[0].insert(0, comp.Plain(prefix))
+        for batch in batches:
             if isinstance(batch[0], comp.Nodes):
                 payload = await batch[0].to_dict()
                 action = (
@@ -178,13 +241,7 @@ class QuoteService:
                 action = "send_group_msg" if group_id else "send_private_msg"
             actions.append((action, {**payload, **target}))
         # OneBot 原样发送文字和 @，绕开框架自动删空白和补空格的行为。
-        for action, payload in actions:
-            response = await event.bot.api.call_action(action, **payload)
-            if isinstance(response, dict) and (
-                response.get("status") == "failed"
-                or response.get("retcode", 0) not in (0, "0", None)
-            ):
-                raise SubmissionError("平台拒绝发送语录，请检查 NapCat 日志")
+        return actions
 
     def _build_nodes(self, session_key: str, nodes: list[ForwardNode]) -> Any:
         if not nodes:

@@ -6,9 +6,11 @@ Keep the upstream session/media layout, but commit quotes and asset indexes toge
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
@@ -44,6 +46,7 @@ from .utils import (
 )
 
 PendingSegment = PendingForwardSegment | PendingQuoteSegment
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -137,6 +140,12 @@ class QuoteRepository:
     def list_quotes(self, session_key: str) -> list[Quote]:
         return self.get_store(session_key).load_quotes()
 
+    def list_all_quotes(self) -> list[Quote]:
+        quotes = [
+            quote for key in self.session_keys() for quote in self.list_quotes(key)
+        ]
+        return sorted(quotes, key=lambda quote: (-quote.created_at, quote.id))
+
     def find_source(self, session_key: str, source_key: str) -> Quote | None:
         return next(
             (
@@ -175,10 +184,144 @@ class QuoteRepository:
 
     async def random_quote(self) -> Quote | None:
         # 与上游一致：按条目抽样，不能先抽群再抽语录，否则小群条目会被加权。
-        candidates = [
-            quote for key in self.session_keys() for quote in self.list_quotes(key)
-        ]
+        candidates = self.list_all_quotes()
         return secrets.choice(candidates) if candidates else None
+
+    async def random_quotes(
+        self, min_count: int = 6, max_count: int = 9
+    ) -> list[Quote]:
+        if min_count < 1 or max_count < min_count:
+            raise ValueError("抽取投稿数量范围无效")
+        candidates = self.list_all_quotes()
+        total = len(candidates)
+        if total < min_count:
+            raise SubmissionError(
+                f"投稿不足，至少需要 {min_count} 条投稿才能摆酒席（当前 {total} 条）"
+            )
+        upper = min(max_count, total)
+        count = min_count + secrets.randbelow(upper - min_count + 1)
+        return secrets.SystemRandom().sample(candidates, count)
+
+    def _quote_locations(self, quote_id: str) -> list[tuple[str, Quote]]:
+        return [
+            (key, quote)
+            for key in self.session_keys()
+            for quote in self.list_quotes(key)
+            if quote.id == quote_id
+        ]
+
+    @staticmethod
+    def _asset_references(quote: Quote) -> tuple[Counter[str], Counter[str]]:
+        images: Counter[str] = Counter()
+        media: Counter[str] = Counter()
+
+        def walk(segments: list[QuoteSegment] | list[ForwardSegment]) -> None:
+            for segment in segments:
+                if segment.asset_id:
+                    if segment.type == "image":
+                        images[segment.asset_id] += 1
+                    elif segment.type in {"record", "video", "file"}:
+                        media[segment.asset_id] += 1
+                for node in segment.nodes:
+                    walk(node.segments)
+
+        walk(quote.segments)
+        for node in quote.forward_nodes:
+            walk(node.segments)
+        return images, media
+
+    def _cleanup_asset_path(
+        self, store: SessionStore, asset: ImageAsset | MediaAsset
+    ) -> Path | None:
+        relative = Path(asset.rel_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            return None
+        path = self.root / relative
+        directory = (
+            store.images_dir if isinstance(asset, ImageAsset) else store.media_dir
+        )
+        resolved = path.resolve()
+        expected = directory.resolve()
+        if resolved == expected or not resolved.is_relative_to(expected):
+            return None
+        if not expected.is_relative_to(self.root.resolve()):
+            return None
+        # 索引只能删除本会话的普通文件；不跟随被替换的目录或文件链接。
+        current = self.root
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                return None
+        return path
+
+    async def delete_quote(self, quote_id: str) -> bool:
+        if not quote_id:
+            return False
+        matches = self._quote_locations(quote_id)
+        if not matches:
+            return False
+        if len(matches) != 1:
+            raise SubmissionError("投稿 ID 重复，无法安全删除，请检查投稿数据")
+        store = self.get_store(matches[0][0])
+        async with store.lock:
+            # 等待回放或其他写入后重新确认全局 ID，避免使用锁外的过期快照。
+            matches = self._quote_locations(quote_id)
+            if not matches:
+                return False
+            if len(matches) != 1:
+                raise SubmissionError("投稿 ID 重复，无法安全删除，请检查投稿数据")
+            if matches[0][0] != store.session_key:
+                raise SubmissionError("投稿所属会话已变化，请重新选择投稿 ID")
+            payload = store.load_payload()
+            quotes = [Quote.from_dict(item) for item in payload["quotes"]]
+            target = next(quote for quote in quotes if quote.id == quote_id)
+            remaining = [quote for quote in quotes if quote.id != quote_id]
+            target_images, target_media = self._asset_references(target)
+            image_refs: Counter[str] = Counter()
+            media_refs: Counter[str] = Counter()
+            for quote in remaining:
+                images, media = self._asset_references(quote)
+                image_refs.update(images)
+                media_refs.update(media)
+
+            images = [ImageAsset.from_dict(item) for item in payload["images"]]
+            media = [MediaAsset.from_dict(item) for item in payload["media"]]
+            removed: list[ImageAsset | MediaAsset] = []
+            kept_images: list[ImageAsset] = []
+            kept_media: list[MediaAsset] = []
+            for image in images:
+                if image.asset_id in target_images and not image_refs[image.asset_id]:
+                    removed.append(image)
+                else:
+                    image.ref_count = image_refs[image.asset_id]
+                    kept_images.append(image)
+            for asset in media:
+                if asset.asset_id in target_media and not media_refs[asset.asset_id]:
+                    removed.append(asset)
+                else:
+                    asset.ref_count = media_refs[asset.asset_id]
+                    kept_media.append(asset)
+
+            store.save_snapshot(remaining, kept_images, kept_media)
+            # 索引提交成功后才允许清理文件。不同资源 ID 也可能指向同一路径。
+            try:
+                retained_paths = {
+                    (self.root / asset.rel_path).resolve()
+                    for asset in [*kept_images, *kept_media]
+                }
+            except Exception:
+                logger.exception("投稿已删除，但无法确认保留资源路径，跳过文件清理")
+                return True
+            for asset in removed:
+                try:
+                    path = self._cleanup_asset_path(store, asset)
+                    if path is None:
+                        logger.warning("投稿已删除，跳过不安全的媒体路径：%s", asset.rel_path)
+                    elif path.resolve() not in retained_paths:
+                        path.unlink(missing_ok=True)
+                except Exception:
+                    logger.exception("投稿已删除，但媒体清理失败：%s", asset.rel_path)
+            return True
 
     async def create_quote_with_segments(
         self, session_key: str, quote: Quote, segments: list[PendingSegment]

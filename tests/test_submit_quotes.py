@@ -742,6 +742,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {key: entry["default"] for key, entry in schema.items()},
             {
+                "delete_whitelist": [],
                 "download_timeout_seconds": 20,
                 "max_file_size_mb": 50,
                 "max_submission_size_mb": 100,

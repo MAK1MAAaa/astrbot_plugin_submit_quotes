@@ -1,7 +1,7 @@
 name: astrbot_plugin_submit_quotes
 display_name: 投稿语录
-desc: 回复消息发送“投稿”完整收录，发送“语录”从所有会话随机回放。
-version: v1.0.0
+desc: 回复消息完整投稿，支持全局随机语录、白名单按 ID 删除及不重复的 6～9 道“摆酒席”。
+version: v1.1.0
 author: 薄暝（上游） / makima（适配）
 repo: https://github.com/MAK1MAAaa/astrbot_plugin_submit_quotes
 support_platforms:
