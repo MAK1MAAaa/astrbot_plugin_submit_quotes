@@ -744,6 +744,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             {key: entry["default"] for key, entry in schema.items()},
             {
                 "moderation_enabled": True,
+                "moderation_scope": "text_and_images",
                 "moderation_provider_id": "",
                 "moderation_timeout_seconds": 20,
                 "moderation_rules": DEFAULT_RULES,

@@ -144,6 +144,11 @@ class QuoteService:
         return result.quote
 
     def _stored_review_segments(self, quote: Quote) -> list[PendingForwardSegment]:
+        review_images = (
+            getattr(getattr(self.moderator, "config", None), "scope", "text_and_images")
+            != "text_only"
+        )
+
         def convert(
             segments: list[QuoteSegment | ForwardSegment],
         ) -> list[PendingForwardSegment]:
@@ -156,7 +161,7 @@ class QuoteService:
                     name=segment.name,
                     face_id=segment.face_id,
                 )
-                if segment.type == "image":
+                if segment.type == "image" and review_images:
                     asset = self.repository.find_asset(quote.group, segment.asset_id)
                     if asset is None:
                         raise SubmissionError("投稿图片索引缺失，无法审查")

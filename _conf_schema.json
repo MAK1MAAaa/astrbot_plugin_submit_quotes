@@ -3,7 +3,15 @@
     "description": "启用投稿内容审查",
     "type": "bool",
     "default": true,
-    "hint": "默认开启。只允许审查明确通过的投稿入库；命中拒收规则精确回复“不中不中”。"
+    "hint": "默认开启。按下方审查范围检查投稿，范围内内容需明确通过才能入库；命中拒收规则精确回复“不中不中”。"
+  },
+  "moderation_scope": {
+    "description": "投稿审查范围",
+    "type": "string",
+    "default": "text_and_images",
+    "options": ["text_and_images", "text_only"],
+    "labels": ["文字与图片", "仅纯文本内容"],
+    "hint": "text_only：只审查消息和嵌套转发中的文字段，图文消息的文字仍会审查；忽略图片、音视频、文件及昵称，无文字时直接跳过审查，不受不可审查媒体策略限制。"
   },
   "moderation_provider_id": {
     "description": "审查模型 ID",
@@ -36,7 +44,7 @@
     "type": "string",
     "default": "reject",
     "options": ["reject", "allow"],
-    "hint": "reject：含语音、视频或文件的投稿暂不收录；allow：明确允许不审查这些媒体的二进制内容，仅审查可见文字、文件名和图片。"
+    "hint": "仅在 text_and_images 模式生效。reject：含语音、视频或文件的投稿暂不收录；allow：仅审查可见文字、文件名和图片。text_only 模式直接忽略媒体内容。"
   },
   "delete_whitelist": {
     "description": "允许查看和删除投稿的 QQ 用户 ID 白名单",
