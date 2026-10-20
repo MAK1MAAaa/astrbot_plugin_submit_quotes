@@ -12,6 +12,12 @@ from .constants import PLUGIN_NAME
 from .errors import SubmissionError
 from .message_service import MediaLimits, MessageService
 from .models import ForwardSegment, Quote, QuoteSegment
+from .moderation import (
+    REJECTED_MESSAGE,
+    ContentModerator,
+    ModerationConfig,
+    ModerationRejected,
+)
 from .napcat_service import NapcatService
 from .quote_service import EMPTY_MESSAGE, RECEIVED_MESSAGE, QuoteService
 from .store import QuoteRepository
@@ -74,6 +80,7 @@ class SubmitQuotesPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         parse_delete_whitelist(config)
+        moderation_config = ModerationConfig.from_config(config)
         self.config = config
         limits = MediaLimits.from_config(config)
         self.repository = QuoteRepository(
@@ -88,6 +95,7 @@ class SubmitQuotesPlugin(Star):
             MessageService(self.http_client, napcat, limits),
             napcat,
             Comp,
+            moderator=ContentModerator(context, moderation_config),
         )
 
     @staticmethod
@@ -141,6 +149,8 @@ class SubmitQuotesPlugin(Star):
         if trigger == "投稿":
             try:
                 await self.quote_service.add_quote(event)
+            except ModerationRejected:
+                await event.send(event.plain_result(REJECTED_MESSAGE))
             except SubmissionError as exc:
                 await event.send(event.plain_result(f"投稿失败：{exc}。"))
             except asyncio.TimeoutError:
@@ -197,15 +207,19 @@ class SubmitQuotesPlugin(Star):
                 if page > pages:
                     await event.send(event.plain_result(f"页码超出范围，共 {pages} 页。"))
                     return
-                lines = [f"投稿列表（第 {page}/{pages} 页，共 {len(quotes)} 条）："]
-                lines.extend(
-                    f"{quote.id} | {quote_preview(quote)}"
-                    for quote in quotes[(page - 1) * 10 : page * 10]
-                )
-                lines.append("删除指定记录：删除投稿 <完整ID>")
+                header = f"投稿列表（第 {page}/{pages} 页，共 {len(quotes)} 条）："
+                instructions = ["删除指定记录：删除投稿 <完整ID>"]
                 if page < pages:
-                    lines.append(f"查看下一页：删除投稿 列表 {page + 1}")
-                await event.send(event.plain_result("\n".join(lines)))
+                    instructions.append(f"查看下一页：删除投稿 列表 {page + 1}")
+                await self.quote_service.send_catalog(
+                    event,
+                    [
+                        (quote, quote_preview(quote))
+                        for quote in quotes[(page - 1) * 10 : page * 10]
+                    ],
+                    header=header,
+                    footer="\n".join(instructions),
+                )
                 return
             if len(args) != 1:
                 await event.send(event.plain_result(self._delete_usage()))

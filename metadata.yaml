@@ -1,8 +1,9 @@
 name: astrbot_plugin_submit_quotes
 display_name: 投稿语录
-desc: 回复消息完整投稿，支持全局随机语录、白名单按 ID 删除及不重复的 6～9 道“摆酒席”。
-version: v1.1.0
+desc: 投稿前审查文字与图片，支持图文删除预览、全局随机语录及不重复的 6～9 道“摆酒席”。
+version: v1.2.0
 author: 薄暝（上游） / makima（适配）
 repo: https://github.com/MAK1MAAaa/astrbot_plugin_submit_quotes
+astrbot_version: ">=4.5.7"
 support_platforms:
   - aiocqhttp

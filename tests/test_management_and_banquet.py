@@ -130,6 +130,17 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
             if part["type"] == "text"
         )
 
+    @staticmethod
+    def catalog_text(event):
+        return "\n".join(
+            part["data"]["text"]
+            for action, params in event.bot.api.calls
+            if action in {"send_group_forward_msg", "send_private_forward_msg"}
+            for node in params["messages"]
+            for part in node["data"]["content"]
+            if part["type"] == "text"
+        )
+
     async def test_whitelist_config_accepts_user_id_lists_and_rejects_invalid_values(self):
         self.assertEqual(ENTRY.parse_delete_whitelist({}), frozenset())
         self.assertEqual(
@@ -197,10 +208,10 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
         ]
         listing = await self.command("删除投稿", group="300")
         self.assertTrue(listing.stopped)
-        self.assertEqual(len(listing.sent), 1)
+        self.assertEqual(len(listing.bot.api.sent), 1)
         for quote in quotes:
-            self.assertIn(quote.id, listing.sent[0])
-            self.assertIn(quote.text, listing.sent[0])
+            self.assertIn(quote.id, self.catalog_text(listing))
+            self.assertIn(quote.text, self.catalog_text(listing))
         event = await self.command(f"删除投稿 {quotes[0].id}", group="")
         self.assertTrue(event.stopped)
         self.assertIn("已删除", event.sent[0])
@@ -212,12 +223,12 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.config = {"delete_whitelist": [12345]}
         quote = await self.add([segment("text", text="数字白名单")])
         event = await self.command("删除投稿")
-        self.assertIn(quote.id, event.sent[0])
+        self.assertIn(quote.id, self.catalog_text(event))
 
     async def test_revoking_whitelist_takes_effect_before_a_listed_id_is_deleted(self):
         quote = await self.add([segment("text", text="撤销后保留")])
         listing = await self.command("删除投稿")
-        self.assertIn(quote.id, listing.sent[0])
+        self.assertIn(quote.id, self.catalog_text(listing))
         self.plugin.config["delete_whitelist"] = []
         with patch.object(self.repository, "delete_quote") as deletion:
             event = await self.command(f"删除投稿 {quote.id}")
@@ -240,7 +251,7 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
             (second, list(reversed(quotes[:2]))),
         ):
             self.assertTrue(event.stopped)
-            text = event.sent[0]
+            text = self.catalog_text(event)
             self.assertEqual(re.findall(r"q_[A-Za-z0-9_-]+", text), [
                 quote.id for quote in expected
             ])
@@ -249,10 +260,18 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
         media = await self.add([segment("image", file=encoded(png_bytes()))])
         long_text = await self.add([segment("text", text="长内容" * 500)])
         event = await self.command("删除投稿")
-        self.assertIn(media.id, event.sent[0])
-        self.assertIn("图片", event.sent[0])
-        self.assertIn(long_text.id, event.sent[0])
-        self.assertLess(len(event.sent[0]), 1000)
+        text = self.catalog_text(event)
+        self.assertIn(media.id, text)
+        self.assertIn("图片", text)
+        self.assertIn(long_text.id, text)
+        self.assertLess(len(text), 1000)
+        images = [
+            part
+            for node in event.bot.api.sent[0]
+            for part in node["data"]["content"]
+            if part["type"] == "image"
+        ]
+        self.assertEqual(len(images), 1)
 
     async def test_empty_pool_listing_is_still_a_handled_command(self):
         event = await self.command("删除投稿")

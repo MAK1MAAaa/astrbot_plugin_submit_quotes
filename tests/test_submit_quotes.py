@@ -13,6 +13,7 @@ import httpx
 from PIL import Image as PILImage
 
 from astrbot_plugin_submit_quotes.message_service import MediaLimits, MessageService
+from astrbot_plugin_submit_quotes.moderation import DEFAULT_RULES
 from astrbot_plugin_submit_quotes.napcat_service import NapcatService
 from astrbot_plugin_submit_quotes.quote_service import (
     EMPTY_MESSAGE,
@@ -742,6 +743,12 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {key: entry["default"] for key, entry in schema.items()},
             {
+                "moderation_enabled": True,
+                "moderation_provider_id": "",
+                "moderation_timeout_seconds": 20,
+                "moderation_rules": DEFAULT_RULES,
+                "moderation_blocked_terms": [],
+                "moderation_unreviewable_policy": "reject",
                 "delete_whitelist": [],
                 "download_timeout_seconds": 20,
                 "max_file_size_mb": 50,

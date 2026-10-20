@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import io
 import json
 from contextlib import AsyncExitStack
 from pathlib import Path
 from time import time
 from typing import Any
 
+from PIL import Image as PILImage
+from PIL import ImageOps
+
 from .errors import SubmissionError
 from .message_service import MessageService
-from .models import ForwardNode, ForwardSegment, Quote, QuoteSegment
+from .models import (
+    ForwardNode,
+    ForwardSegment,
+    PendingForwardNode,
+    PendingForwardSegment,
+    PreparedImage,
+    PreparedMedia,
+    Quote,
+    QuoteSegment,
+)
+from .moderation import ContentModerator
 from .napcat_service import NapcatService
 from .replay import make_replay_nodes_type
 from .store import QuoteRepository
@@ -29,12 +44,14 @@ class QuoteService:
         message_service: MessageService,
         napcat_service: NapcatService,
         components: Any,
+        moderator: ContentModerator | None = None,
     ):
         self.repository = repository
         self.message_service = message_service
         self.napcat_service = napcat_service
         self.components = components
         self.nodes_type = make_replay_nodes_type(components)
+        self.moderator = moderator
 
     @staticmethod
     def session_key(event: Any) -> str:
@@ -71,8 +88,19 @@ class QuoteService:
         source_key = self.source_key(event, message_id)
         existing = self.repository.find_source(session_key, source_key)
         if existing is not None:
-            self.build_quote_batches(existing)
-            return existing
+            if self.moderator is not None:
+                async with self.repository.get_store(session_key).lock:
+                    existing = self.repository.find_source(session_key, source_key)
+                    if existing is not None:
+                        pending = self._stored_review_segments(existing)
+                if existing is not None:
+                    await self.moderator.review(event, pending)
+            if existing is not None:
+                async with self.repository.get_store(session_key).lock:
+                    existing = self.repository.find_source(session_key, source_key)
+                    if existing is not None:
+                        self.build_quote_batches(existing)
+                        return existing
         try:
             payload = await asyncio.wait_for(
                 self.napcat_service.fetch_onebot_message(event, message_id),
@@ -88,6 +116,9 @@ class QuoteService:
         sender = payload.get("sender") or {}
         if not isinstance(sender, dict):
             raise SubmissionError("原消息作者信息格式错误")
+        if self.moderator is not None:
+            # 只审查被回复的原消息；通过之前不提交记录、媒体或索引。
+            await self.moderator.review(event, segments)
         qq = str(sender.get("user_id") or sender.get("qq") or "")
         quote = Quote(
             id=random_id("q_"),
@@ -111,6 +142,63 @@ class QuoteService:
                 session_key, quote, segments
             )
         return result.quote
+
+    def _stored_review_segments(self, quote: Quote) -> list[PendingForwardSegment]:
+        def convert(
+            segments: list[QuoteSegment | ForwardSegment],
+        ) -> list[PendingForwardSegment]:
+            pending: list[PendingForwardSegment] = []
+            for segment in segments:
+                item = PendingForwardSegment(
+                    type=segment.type,
+                    text=segment.text,
+                    qq=segment.qq,
+                    name=segment.name,
+                    face_id=segment.face_id,
+                )
+                if segment.type == "image":
+                    asset = self.repository.find_asset(quote.group, segment.asset_id)
+                    if asset is None:
+                        raise SubmissionError("投稿图片索引缺失，无法审查")
+                    path = self.repository.asset_path(asset)
+                    item.image = PreparedImage(
+                        content=path.read_bytes(),
+                        extension=path.suffix,
+                        sha256=asset.sha256,
+                        width=asset.width,
+                        height=asset.height,
+                    )
+                elif segment.type == "nodes":
+                    item.nodes = nodes(segment.nodes)
+                elif segment.type in {"record", "video", "file"}:
+                    asset = self.repository.find_media_asset(
+                        quote.group, segment.asset_id
+                    )
+                    if asset is None:
+                        raise SubmissionError("投稿媒体索引缺失，无法审查")
+                    item.media = PreparedMedia(
+                        content=b"",
+                        extension=Path(asset.file_name).suffix,
+                        media_type=segment.type,
+                        display_name=asset.display_name,
+                    )
+                pending.append(item)
+            return pending
+
+        def nodes(saved: list[ForwardNode]) -> list[PendingForwardNode]:
+            return [
+                PendingForwardNode(
+                    sender_uin=node.sender_uin,
+                    sender_name=node.sender_name,
+                    timestamp=node.timestamp,
+                    segments=convert(node.segments),
+                )
+                for node in saved
+            ]
+
+        if quote.kind == "forward":
+            return [PendingForwardSegment(type="nodes", nodes=nodes(quote.forward_nodes))]
+        return convert(quote.segments)
 
     def build_quote_batches(self, quote: Quote) -> list[list[Any]]:
         if quote.kind == "forward":
@@ -141,6 +229,127 @@ class QuoteService:
 
     async def send_quote(self, event: Any, quote: Quote) -> None:
         await self._send_quotes(event, [quote], banquet=False)
+
+    async def send_catalog(
+        self,
+        event: Any,
+        entries: list[tuple[Quote, str]],
+        *,
+        header: str,
+        footer: str,
+    ) -> None:
+        if len(entries) > 10:
+            raise SubmissionError("每页最多预览 10 条投稿")
+        group_id = str(event.get_group_id() or "")
+        target_id = group_id or str(event.get_sender_id())
+        if not target_id.isdigit():
+            raise SubmissionError("无法确定投稿预览发送目标")
+        self_id = getattr(event.message_obj, "self_id", None)
+        sender_id = str(self_id or event.get_sender_id())
+        timestamp = int(time())
+
+        def text_segment(text: str) -> dict:
+            return {"type": "text", "data": {"text": text}}
+
+        def preview_node(content: list[dict]) -> dict:
+            return {
+                "type": "node",
+                "data": {
+                    "user_id": sender_id,
+                    "nickname": "投稿预览",
+                    "time": timestamp,
+                    "content": content,
+                },
+            }
+
+        messages = [preview_node([text_segment(header)])]
+        async with AsyncExitStack() as locks:
+            # 缩略图生成完毕即可释放资源锁；发送的是内存图片，不再依赖原文件。
+            sessions = sorted({quote.group for quote, _ in entries})
+            for session in sessions:
+                await locks.enter_async_context(self.repository.get_store(session).lock)
+            current = {
+                (session, quote.id): quote
+                for session in sessions
+                for quote in self.repository.list_quotes(session)
+            }
+            for quote, preview in entries:
+                saved = current.get((quote.group, quote.id))
+                content = [text_segment(f"ID：{quote.id}\n{preview}")]
+                if saved is None:
+                    content.append(text_segment("\n[投稿已删除]"))
+                else:
+                    image_ids = self._catalog_image_ids(saved)
+                    for index, asset_id in enumerate(image_ids[:3], start=1):
+                        try:
+                            asset = self.repository.find_asset(saved.group, asset_id)
+                            if asset is None:
+                                raise SubmissionError("投稿图片索引缺失")
+                            path = self.repository.asset_path(asset)
+                            thumbnail = await asyncio.to_thread(
+                                self._catalog_thumbnail, path
+                            )
+                        except Exception:
+                            # 损坏的投稿也必须能通过 ID 识别和删除。
+                            content.append(
+                                text_segment(f"\n[第 {index} 张图片无法预览]")
+                            )
+                        else:
+                            content.append(
+                                {"type": "image", "data": {"file": thumbnail}}
+                            )
+                    if len(image_ids) > 3:
+                        content.append(
+                            text_segment(f"\n[还有 {len(image_ids) - 3} 张图片]")
+                        )
+                messages.append(preview_node(content))
+        messages.append(preview_node([text_segment(footer)]))
+        target = {"group_id" if group_id else "user_id": int(target_id)}
+        if self_id:
+            target["self_id"] = self_id
+        action = "send_group_forward_msg" if group_id else "send_private_forward_msg"
+        response = await event.bot.api.call_action(action, messages=messages, **target)
+        if isinstance(response, dict) and (
+            response.get("status") == "failed"
+            or response.get("retcode", 0) not in (0, "0", None)
+        ):
+            raise SubmissionError("平台拒绝发送投稿预览，请检查 NapCat 日志")
+
+    @staticmethod
+    def _catalog_image_ids(quote: Quote) -> list[str]:
+        image_ids: list[str] = []
+
+        def walk(segments: list[QuoteSegment | ForwardSegment]) -> None:
+            for segment in segments:
+                if segment.type == "image":
+                    image_ids.append(segment.asset_id)
+                if segment.type == "nodes":
+                    for node in segment.nodes:
+                        walk(node.segments)
+
+        if quote.kind == "forward":
+            for node in quote.forward_nodes:
+                walk(node.segments)
+        else:
+            walk(quote.segments)
+        return image_ids or list(quote.image_ids)
+
+    @staticmethod
+    def _catalog_thumbnail(path: Path) -> str:
+        with PILImage.open(path) as original:
+            original.seek(0)
+            # 动图只取首帧，且只生成内存副本，不覆盖存档图片。
+            frame = ImageOps.exif_transpose(original)
+            frame.thumbnail((480, 480), PILImage.Resampling.LANCZOS)
+            if "A" in frame.getbands() or "transparency" in frame.info:
+                rgba = frame.convert("RGBA")
+                thumbnail = PILImage.new("RGB", rgba.size, "white")
+                thumbnail.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                thumbnail = frame.convert("RGB")
+            output = io.BytesIO()
+            thumbnail.save(output, format="JPEG", quality=85)
+        return "base64://" + base64.b64encode(output.getvalue()).decode("ascii")
 
     async def send_banquet(self, event: Any, quotes: list[Quote]) -> None:
         if not 6 <= len(quotes) <= 9:

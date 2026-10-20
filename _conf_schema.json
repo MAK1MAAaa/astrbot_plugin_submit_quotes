@@ -1,4 +1,43 @@
 {
+  "moderation_enabled": {
+    "description": "启用投稿内容审查",
+    "type": "bool",
+    "default": true,
+    "hint": "默认开启。只允许审查明确通过的投稿入库；命中拒收规则精确回复“不中不中”。"
+  },
+  "moderation_provider_id": {
+    "description": "审查模型 ID",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "填写 AstrBot 已配置的聊天模型 ID；留空使用当前会话的聊天模型。审查图片必须使用支持识图的模型。"
+  },
+  "moderation_timeout_seconds": {
+    "description": "单条投稿审查超时（秒）",
+    "type": "int",
+    "default": 20,
+    "hint": "必须大于 0。模型不可用、超时或无法确认检查全部内容时暂不入库。"
+  },
+  "moderation_rules": {
+    "description": "投稿审查规则",
+    "type": "text",
+    "default": "拒绝现实政治敏感或争议内容，包括对现实政治人物、政党、政治体制的侮辱或影射，政治宣传动员、敏感政治事件及口号、分裂或极端政治主张。普通生活、游戏和虚构内容允许；中性历史、地理常识不因出现相关名称就拒绝。",
+    "hint": "发给独立审查模型的管理员规则。可按群规调整；不会使用聊天人格和对话历史。"
+  },
+  "moderation_blocked_terms": {
+    "description": "额外拒收词列表",
+    "type": "list",
+    "items": {"type": "string"},
+    "default": [],
+    "hint": "文字命中任一词直接拒收；会归一化全角、大小写和零宽格式字符。即使未命中仍需通过模型审查。"
+  },
+  "moderation_unreviewable_policy": {
+    "description": "无法识别内容的媒体处理方式",
+    "type": "string",
+    "default": "reject",
+    "options": ["reject", "allow"],
+    "hint": "reject：含语音、视频或文件的投稿暂不收录；allow：明确允许不审查这些媒体的二进制内容，仅审查可见文字、文件名和图片。"
+  },
   "delete_whitelist": {
     "description": "允许查看和删除投稿的 QQ 用户 ID 白名单",
     "type": "list",
