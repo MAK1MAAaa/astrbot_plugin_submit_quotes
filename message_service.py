@@ -24,6 +24,8 @@ from .napcat_service import NapcatService
 from .utils import parse_cq_message, prepare_image, prepare_media
 
 MEDIA_NAMES = {"image": "图片", "record": "语音", "video": "视频", "file": "文件"}
+SUBMISSION_TYPE_ERROR = "仅支持文字和图片投稿（合并转发也只能包含文字和图片）"
+SUBMISSION_TYPES = {"text", "plain", "image", "forward", "node", "nodes"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,21 +70,66 @@ class MessageService:
     async def build_reply_segments(
         self, event: Any, message: Any
     ) -> list[PendingForwardSegment]:
+        # 先解析整棵转发树并检查类型，禁止内容不能触发图片或其他媒体下载。
+        message = await self._check_submission_types(event, message, depth=0)
         return await self._build_segments(event, message, DownloadBudget(), depth=0)
 
-    async def _build_segments(
-        self, event: Any, message: Any, budget: DownloadBudget, depth: int
-    ) -> list[PendingForwardSegment]:
+    @staticmethod
+    def _message_items(message: Any) -> list[dict]:
         if isinstance(message, str):
             message = parse_cq_message(message)
         elif isinstance(message, dict):
             message = [message]
         if not isinstance(message, list) or not message:
             raise SubmissionError("未获取到可保存的消息内容")
-        segments: list[PendingForwardSegment] = []
         for item in message:
             if not isinstance(item, dict) or not isinstance(item.get("data", {}), dict):
                 raise SubmissionError("消息段格式错误，无法完整保存")
+            seg_type = str(item.get("type") or "").lower()
+            if seg_type not in SUBMISSION_TYPES:
+                raise SubmissionError(
+                    f"{SUBMISSION_TYPE_ERROR}；不支持消息类型 {seg_type or 'unknown'}"
+                )
+        return message
+
+    async def _check_submission_types(
+        self, event: Any, message: Any, depth: int
+    ) -> list[dict]:
+        checked: list[dict] = []
+        for item in self._message_items(message):
+            kind = str(item.get("type") or "").lower()
+            if kind not in {"forward", "node", "nodes"}:
+                checked.append(item)
+                continue
+            if depth >= 3:
+                raise SubmissionError("合并转发超过三层，无法完整保存")
+            nodes = []
+            for node in await self._forward_messages(event, item):
+                if not isinstance(node, dict):
+                    raise SubmissionError("合并转发节点格式错误")
+                if node.get("type") == "node":
+                    node = node.get("data", {})
+                if not isinstance(node, dict):
+                    raise SubmissionError("合并转发节点格式错误")
+                chain = next(
+                    (
+                        node[key]
+                        for key in ("content", "message", "raw_message")
+                        if key in node
+                    ),
+                    None,
+                )
+                content = await self._check_submission_types(event, chain, depth + 1)
+                nodes.append({**node, "content": content})
+            # 缓存已获取的转发内容，后续媒体处理不再次请求平台转发接口。
+            checked.append({"type": "nodes", "data": {"nodes": nodes}})
+        return checked
+
+    async def _build_segments(
+        self, event: Any, message: Any, budget: DownloadBudget, depth: int
+    ) -> list[PendingForwardSegment]:
+        segments: list[PendingForwardSegment] = []
+        for item in self._message_items(message):
             seg_type = str(item.get("type") or "").lower()
             data = item.get("data", {})
             if seg_type in {"text", "plain"}:
@@ -90,31 +137,9 @@ class MessageService:
                 if not isinstance(text, str):
                     raise SubmissionError("文字消息段内容无效")
                 segments.append(PendingForwardSegment(type="text", text=text))
-            elif seg_type in MEDIA_NAMES:
+            elif seg_type == "image":
                 prepared = await self._prepare_media(event, data, seg_type, budget)
-                if isinstance(prepared, PreparedImage):
-                    segments.append(PendingForwardSegment(type="image", image=prepared))
-                else:
-                    segments.append(
-                        PendingForwardSegment(type=seg_type, media=prepared)
-                    )
-            elif seg_type == "face":
-                try:
-                    face_id = int(data["id"])
-                except (KeyError, ValueError, TypeError) as exc:
-                    raise SubmissionError("QQ 表情编号无效") from exc
-                if face_id < 0:
-                    raise SubmissionError("QQ 表情编号无效")
-                segments.append(PendingForwardSegment(type="face", face_id=face_id))
-            elif seg_type == "at":
-                qq = str(data.get("qq") or data.get("user_id") or "")
-                if qq != "all" and not (qq.isdigit() and int(qq) > 0):
-                    raise SubmissionError("@ 消息缺少有效的用户编号")
-                segments.append(
-                    PendingForwardSegment(
-                        type="at", qq=qq, name=str(data.get("name") or "")
-                    )
-                )
+                segments.append(PendingForwardSegment(type="image", image=prepared))
             elif seg_type in {"forward", "node", "nodes"}:
                 if depth >= 3:
                     raise SubmissionError("合并转发超过三层，无法完整保存")
@@ -128,9 +153,7 @@ class MessageService:
             raise SubmissionError("原消息内容为空")
         return segments
 
-    async def _build_forward_nodes(
-        self, event: Any, item: dict, budget: DownloadBudget, depth: int
-    ) -> list[PendingForwardNode]:
+    async def _forward_messages(self, event: Any, item: dict) -> list[dict]:
         data = item.get("data", {})
         seg_type = str(item.get("type") or "").lower()
         if seg_type == "node":
@@ -147,8 +170,13 @@ class MessageService:
             )
         if not isinstance(messages, list) or not messages:
             raise SubmissionError("无法获取完整的合并转发内容")
+        return messages
+
+    async def _build_forward_nodes(
+        self, event: Any, item: dict, budget: DownloadBudget, depth: int
+    ) -> list[PendingForwardNode]:
         nodes: list[PendingForwardNode] = []
-        for raw_node in messages:
+        for raw_node in await self._forward_messages(event, item):
             if not isinstance(raw_node, dict):
                 raise SubmissionError("合并转发节点格式错误")
             if raw_node.get("type") == "node":

@@ -26,6 +26,7 @@ from astrbot_plugin_submit_quotes.tests.fakes import (
     Reply,
     import_plugin_entry,
 )
+from astrbot_plugin_submit_quotes.tests.legacy_fixtures import seed_legacy_quote
 
 ENTRY = import_plugin_entry()
 
@@ -114,6 +115,11 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
             await self.add([segment("text", text=f"投稿内容{index}")])
             for index in range(count)
         ]
+
+    async def add_legacy(self, content):
+        self.message_counter += 1
+        event = FakeEvent([Reply(self.message_counter), Plain("投稿")])
+        return await seed_legacy_quote(self.service, event, content)
 
     async def command(self, text, **options):
         event = FakeEvent([Plain(text)], **options)
@@ -372,7 +378,7 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event.bot.api.calls, [])
 
     async def test_banquet_preserves_image_face_at_and_original_text_order(self):
-        first = await self.add(
+        first = await self.add_legacy(
             [
                 segment("text", text="  前\n"),
                 segment("image", file=encoded(png_bytes())),
@@ -398,7 +404,7 @@ class ManagementAndBanquetTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(content[at_index + 1]["data"]["text"].startswith("紧接@  "))
 
     async def test_banquet_sends_voice_video_file_and_forward_alone_in_order(self):
-        first = await self.add(
+        first = await self.add_legacy(
             [
                 segment("text", text="前"),
                 segment("record", file=encoded(b"audio")),

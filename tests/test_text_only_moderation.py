@@ -373,15 +373,13 @@ class TextOnlySubmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         event.unified_msg_origin = "qq-test:GroupMessage:100"
         return event
 
-    async def test_constructor_uses_text_scope_and_still_saves_original_mixed_media(
+    async def test_constructor_uses_text_scope_and_still_saves_original_image_and_text(
         self,
     ):
         image = png_bytes()
         content = [
             raw_segment("text", text="  原文\n "),
             raw_segment("image", file=encoded(image)),
-            raw_segment("record", file=encoded(b"audio"), name="a.mp3"),
-            raw_segment("file", file=encoded(b"document"), name="a.txt"),
         ]
         event = self.submission(content)
         with patch.object(
@@ -394,9 +392,7 @@ class TextOnlySubmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.sent, [RECEIVED_MESSAGE])
         self.assertEqual(self.plugin.quote_service.moderator.config.scope, "text_only")
         quote = self.plugin.repository.list_all_quotes()[0]
-        self.assertEqual(
-            [part.type for part in quote.segments], ["text", "image", "record", "file"]
-        )
+        self.assertEqual([part.type for part in quote.segments], ["text", "image"])
         self.assertEqual(quote.segments[0].text, "  原文\n ")
         asset = self.plugin.repository.find_asset(quote.group, quote.image_ids[0])
         self.assertEqual(self.plugin.repository.asset_path(asset).read_bytes(), image)
@@ -407,13 +403,12 @@ class TextOnlySubmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [{"type": "text", "text": "  原文\n "}],
         )
 
-    async def test_pure_image_and_media_can_be_saved_without_configured_model(self):
+    async def test_pure_images_can_be_saved_without_configured_model(self):
         self.context.get_current_chat_provider_id.return_value = None
         event = self.submission(
             [
                 raw_segment("image", file=encoded(png_bytes())),
-                raw_segment("video", file=encoded(b"video"), name="a.mp4"),
-                raw_segment("file", file=encoded(b"file"), name="a.txt"),
+                forward([raw_segment("image", file=encoded(png_bytes()))]),
             ]
         )
         await self.plugin.on_message(event)

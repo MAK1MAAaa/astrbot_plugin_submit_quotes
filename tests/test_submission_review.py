@@ -147,9 +147,7 @@ class SubmissionReviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
             umo=event.unified_msg_origin
         )
         self.context.llm_generate.assert_awaited_once()
-        self.assertEqual(
-            self.all_quotes()[0].segments[0].text, "  原文，保留空白\n "
-        )
+        self.assertEqual(self.all_quotes()[0].segments[0].text, "  原文，保留空白\n ")
 
     async def test_rejected_text_replies_exactly_and_never_creates_record(self):
         self.context.llm_generate.side_effect = None
@@ -179,7 +177,9 @@ class SubmissionReviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.on_message(event)
         self.assertEqual(event.sent, [RECEIVED_MESSAGE])
         quote = self.all_quotes()[0]
-        self.assertEqual([item.type for item in quote.segments], ["text", "image", "text"])
+        self.assertEqual(
+            [item.type for item in quote.segments], ["text", "image", "text"]
+        )
         self.assertEqual(quote.segments[0].text, "  前文 ")
         self.assertEqual(quote.segments[2].text, " 后文\n")
         self.assertTrue(self.review_images)
@@ -256,13 +256,33 @@ class SubmissionReviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [
                 segment("text", text="文本"),
                 segment("image", file=encoded(png_bytes())),
-                segment("file", file=encoded(b"document"), name="a.txt"),
+                segment("text", text="尾部文字"),
             ]
         )
         await self.plugin.on_message(event)
         self.assert_failed_without_resources(event)
 
-    async def test_disabled_review_preserves_previous_media_submission_support(self):
+    async def test_disabled_review_preserves_text_and_image_submission_support(self):
+        await self.plugin.terminate()
+        self.plugin = self.make_plugin({"moderation_enabled": False})
+        event = self.submission(
+            [
+                segment("text", text="文字"),
+                segment("image", file=encoded(png_bytes())),
+            ]
+        )
+        await self.plugin.on_message(event)
+        self.assertEqual(event.sent, [RECEIVED_MESSAGE])
+        self.context.get_current_chat_provider_id.assert_not_awaited()
+        self.context.llm_generate.assert_not_awaited()
+        quote = self.all_quotes()[0]
+        self.assertEqual([part.type for part in quote.segments], ["text", "image"])
+        asset = self.plugin.repository.find_asset(quote.group, quote.image_ids[0])
+        self.assertEqual(
+            self.plugin.repository.asset_path(asset).read_bytes(), png_bytes()
+        )
+
+    async def test_disabled_review_does_not_allow_new_record_submission(self):
         await self.plugin.terminate()
         self.plugin = self.make_plugin({"moderation_enabled": False})
         event = self.submission(
@@ -273,13 +293,9 @@ class SubmissionReviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         await self.plugin.on_message(event)
-        self.assertEqual(event.sent, [RECEIVED_MESSAGE])
+        self.assert_failed_without_resources(event)
         self.context.get_current_chat_provider_id.assert_not_awaited()
         self.context.llm_generate.assert_not_awaited()
-        quote = self.all_quotes()[0]
-        self.assertEqual([part.type for part in quote.segments], ["text", "image", "record"])
-        asset = self.plugin.repository.find_media_asset(quote.group, quote.media_ids[0])
-        self.assertEqual(self.plugin.repository.asset_path(asset).read_bytes(), b"audio")
 
     async def test_no_reference_uses_usage_hint_without_calling_review(self):
         event = FakeEvent([Plain("投稿")])

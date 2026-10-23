@@ -11,7 +11,7 @@
     "default": "text_and_images",
     "options": ["text_and_images", "text_only"],
     "labels": ["文字与图片", "仅纯文本内容"],
-    "hint": "text_only：只审查消息和嵌套转发中的文字段，图文消息的文字仍会审查；忽略图片、音视频、文件及昵称，无文字时直接跳过审查，不受不可审查媒体策略限制。"
+    "hint": "text_only：只审查消息和嵌套转发中的文字段，图文消息的文字仍会审查；图片及昵称不参与审查，无文字时直接跳过审查。所有模式的新投稿都仅允许文字和图片。"
   },
   "moderation_provider_id": {
     "description": "审查模型 ID",
@@ -40,11 +40,12 @@
     "hint": "文字命中任一词直接拒收；会归一化全角、大小写和零宽格式字符。即使未命中仍需通过模型审查。"
   },
   "moderation_unreviewable_policy": {
-    "description": "无法识别内容的媒体处理方式",
+    "description": "旧版媒体审查策略（兼容保留）",
     "type": "string",
     "default": "reject",
     "options": ["reject", "allow"],
-    "hint": "仅在 text_and_images 模式生效。reject：含语音、视频或文件的投稿暂不收录；allow：仅审查可见文字、文件名和图片。text_only 模式直接忽略媒体内容。"
+    "invisible": true,
+    "hint": "兼容旧配置保留。新投稿始终仅允许文字和图片，此项不能放宽投稿类型。"
   },
   "delete_whitelist": {
     "description": "允许查看和删除投稿的 QQ 用户 ID 白名单",

@@ -12,7 +12,11 @@ from unittest.mock import patch
 import httpx
 from PIL import Image as PILImage
 
-from astrbot_plugin_submit_quotes.message_service import MediaLimits, MessageService
+from astrbot_plugin_submit_quotes.message_service import (
+    DownloadBudget,
+    MediaLimits,
+    MessageService,
+)
 from astrbot_plugin_submit_quotes.moderation import DEFAULT_RULES
 from astrbot_plugin_submit_quotes.napcat_service import NapcatService
 from astrbot_plugin_submit_quotes.quote_service import (
@@ -36,6 +40,7 @@ from astrbot_plugin_submit_quotes.tests.fakes import (
     Video,
     import_plugin_entry,
 )
+from astrbot_plugin_submit_quotes.tests.legacy_fixtures import seed_legacy_quote
 
 ENTRY = import_plugin_entry()
 
@@ -48,9 +53,9 @@ def encoded(content: bytes) -> str:
     return "base64://" + base64.b64encode(content).decode()
 
 
-def png_bytes() -> bytes:
+def png_bytes(color="blue") -> bytes:
     stream = io.BytesIO()
-    PILImage.new("RGB", (2, 3), "blue").save(stream, format="PNG")
+    PILImage.new("RGB", (2, 3), color).save(stream, format="PNG")
     return stream.getvalue()
 
 
@@ -144,7 +149,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(event.bot.api.calls[0], ("get_msg", {"message_id": -123}))
 
-    async def test_all_media_and_components_round_trip_in_order(self):
+    async def test_legacy_media_and_components_round_trip_in_order(self):
         image = png_bytes()
         content = [
             segment("text", text="[图片]"),
@@ -158,7 +163,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             segment("file", file=encoded(b"document"), name="原文件.txt"),
             segment("text", text="后"),
         ]
-        quote = await self.service.add_quote(self.submission(content))
+        quote = await seed_legacy_quote(self.service, self.submission(content), content)
         restored = QuoteRepository(self.root)
         self.service.repository = restored
         quote = restored.list_quotes(quote.group)[0]
@@ -214,7 +219,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         first = forward(
             [segment("text", text="前"), second, segment("text", text="后")]
         )
-        quote = await self.service.add_quote(self.submission([first]))
+        quote = await seed_legacy_quote(self.service, self.submission([first]), [first])
         self.assertEqual(quote.kind, "forward")
         component = self.service.build_quote_batches(quote)[0][0]
         self.assertIsInstance(component, Nodes)
@@ -297,7 +302,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
                     segment("json", data="unsupported"),
                 ]
             ),
-            "暂不支持消息类型 json",
+            "不支持消息类型 json",
         )
 
     async def test_media_failure_does_not_leave_files_or_success_confirmation(self):
@@ -305,9 +310,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             [segment("image", file=encoded(b"bad image"))],
             [
                 segment("image", file=encoded(png_bytes())),
-                segment("record", url="https://media.test/missing"),
+                segment("image", url="https://media.test/missing"),
             ],
-            [segment("file", file_id="missing")],
+            [segment("image", file_id="missing")],
         ]
         for content in cases:
             with self.subTest(content=content):
@@ -322,18 +327,19 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         for data in ({"file": encoded(b"1234")}, {"file_id": "remote", "size": 4}):
             with self.subTest(data=data):
                 await self.assert_submission_failed(
-                    self.submission([segment("file", **data)]), "上限"
+                    self.submission([segment("image", **data)]), "上限"
                 )
 
     async def test_total_limit_includes_nested_media(self):
+        image = png_bytes()
         self.message_service.limits = MediaLimits(
-            max_file_bytes=6, max_submission_bytes=6
+            max_file_bytes=len(image), max_submission_bytes=len(image) * 2 - 1
         )
         await self.assert_submission_failed(
             self.submission(
                 [
-                    segment("record", file=encoded(b"1234")),
-                    forward([segment("file", file=encoded(b"567"))]),
+                    segment("image", file=encoded(image)),
+                    forward([segment("image", file=encoded(image))]),
                 ]
             ),
             "上限",
@@ -343,24 +349,22 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         async def response(request):
             return httpx.Response(
                 200,
-                content=b"downloaded",
-                headers={"content-type": "application/octet-stream"},
+                content=png_bytes(),
+                headers={"content-type": "image/png"},
             )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
             self.message_service.http_client = client
             quote = await self.service.add_quote(
-                self.submission(
-                    [segment("file", url="https://media.test/doc", name="d.bin")]
-                )
+                self.submission([segment("image", url="https://media.test/image")])
             )
-            asset = self.repository.find_media_asset(quote.group, quote.media_ids[0])
+            asset = self.repository.find_asset(quote.group, quote.image_ids[0])
             self.assertEqual(
-                self.repository.asset_path(asset).read_bytes(), b"downloaded"
+                self.repository.asset_path(asset).read_bytes(), png_bytes()
             )
             self.message_service.limits = MediaLimits(max_file_bytes=3)
             event = self.submission(
-                [segment("file", url="https://media.test/doc")], message_id="456"
+                [segment("image", url="https://media.test/image")], message_id="456"
             )
             await self.plugin.on_message(event)
             self.assertIn("上限", event.sent[0])
@@ -375,7 +379,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
             self.message_service.http_client = client
             await self.assert_submission_failed(
-                self.submission([segment("file", url="https://media.test/slow")]),
+                self.submission([segment("image", url="https://media.test/slow")]),
                 "获取超时",
             )
 
@@ -394,7 +398,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             await self.assert_submission_failed(
                 self.submission(
                     [
-                        segment("file", url="https://media.test/chunked"),
+                        segment("image", url="https://media.test/chunked"),
                     ]
                 ),
                 "上限",
@@ -431,21 +435,30 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
                     return original(name, params)
 
                 event.bot.api.handler = handler
-                await self.plugin.on_message(event)
-                self.assertEqual(event.sent, [RECEIVED_MESSAGE])
+                if kind == "image":
+                    await self.plugin.on_message(event)
+                    self.assertEqual(event.sent, [RECEIVED_MESSAGE])
+                else:
+                    # 历史媒体下载能力仍可用于维护工具，禁止绕过新投稿入口。
+                    prepared = await self.message_service._prepare_media(
+                        event,
+                        {"file": "identifier", "file_id": "identifier"},
+                        kind,
+                        DownloadBudget(),
+                    )
+                    self.assertEqual(prepared.content, content)
+                    self.assertEqual(event.sent, [])
                 self.assertTrue(any(call[0] == action for call in event.bot.api.calls))
 
     async def test_local_media_is_copied_and_survives_source_removal(self):
         with tempfile.TemporaryDirectory() as sources:
-            source = Path(sources) / "文件 空格.txt"
-            source.write_bytes(b"local")
+            source = Path(sources) / "图片 空格.png"
+            source.write_bytes(png_bytes())
             quote = await self.service.add_quote(
-                self.submission(
-                    [segment("file", file=source.as_uri(), name=source.name)]
-                )
+                self.submission([segment("image", file=source.as_uri())])
             )
-        asset = self.repository.find_media_asset(quote.group, quote.media_ids[0])
-        self.assertEqual(self.repository.asset_path(asset).read_bytes(), b"local")
+        asset = self.repository.find_asset(quote.group, quote.image_ids[0])
+        self.assertEqual(self.repository.asset_path(asset).read_bytes(), png_bytes())
 
     async def test_no_reply_or_multiple_replies_reports_usage(self):
         for message in ([Plain("投稿")], [Reply(1), Reply(2), Plain("投稿")]):
@@ -542,7 +555,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
             event = self.submission(
                 [
                     segment("image", file=encoded(png_bytes())),
-                    segment("record", file=encoded(b"record")),
+                    segment("text", text="新增图片"),
                 ],
                 message_id="new",
             )
@@ -574,7 +587,7 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
                 self.submission(
                     [
                         segment("image", file=encoded(png_bytes())),
-                        segment("record", file=encoded(b"audio")),
+                        segment("image", file=encoded(png_bytes("red"))),
                     ]
                 ),
                 "保存失败",
@@ -639,16 +652,13 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(event.bot.api.calls, [])
 
     async def test_query_sends_media_as_sequential_batches(self):
-        await self.service.add_quote(
-            self.submission(
-                [
-                    segment("text", text="前"),
-                    segment("record", file=encoded(b"audio")),
-                    segment("text", text="后"),
-                    forward([segment("text", text="记录")]),
-                ]
-            )
-        )
+        content = [
+            segment("text", text="前"),
+            segment("record", file=encoded(b"audio")),
+            segment("text", text="后"),
+            forward([segment("text", text="记录")]),
+        ]
+        await seed_legacy_quote(self.service, self.submission(content), content)
         query = FakeEvent([Plain("语录")])
         await self.plugin.on_message(query)
         self.assertEqual(
@@ -661,16 +671,13 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_onebot_replay_preserves_whitespace_and_at_without_inserting_text(
         self,
     ):
-        quote = await self.service.add_quote(
-            self.submission(
-                [
-                    segment("text", text=" \n"),
-                    segment("image", file=encoded(png_bytes())),
-                    segment("at", qq="23456"),
-                    segment("text", text="紧接@"),
-                ]
-            )
-        )
+        content = [
+            segment("text", text=" \n"),
+            segment("image", file=encoded(png_bytes())),
+            segment("at", qq="23456"),
+            segment("text", text="紧接@"),
+        ]
+        quote = await seed_legacy_quote(self.service, self.submission(content), content)
         query = FakeEvent([Plain("语录")], group="", sender="34567")
         await self.service.send_quote(query, quote)
         self.assertEqual(
@@ -683,14 +690,11 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query.bot.api.calls[0][1]["self_id"], "99999")
 
     async def test_late_media_conversion_failure_sends_no_partial_quote(self):
-        quote = await self.service.add_quote(
-            self.submission(
-                [
-                    segment("text", text="前"),
-                    segment("record", file=encoded(b"audio")),
-                ]
-            )
-        )
+        content = [
+            segment("text", text="前"),
+            segment("record", file=encoded(b"audio")),
+        ]
+        quote = await seed_legacy_quote(self.service, self.submission(content), content)
         query = FakeEvent([Plain("语录")])
         with patch.object(
             Record, "convert_to_base64", side_effect=ValueError("conversion failed")

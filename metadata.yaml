@@ -1,7 +1,7 @@
 name: astrbot_plugin_submit_quotes
 display_name: 投稿语录
-desc: 支持仅文本或图文投稿审查、图文删除预览、全局随机语录及不重复的 6～9 道“摆酒席”。
-version: v1.2.3
+desc: 仅收录文字和图片，支持内容审查、图文删除预览、全局随机语录及不重复的 6～9 道“摆酒席”。
+version: v1.3.0
 author: 薄暝（上游） / makima（适配）
 repo: https://github.com/MAK1MAAaa/astrbot_plugin_submit_quotes
 astrbot_version: ">=4.5.7"

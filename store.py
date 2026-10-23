@@ -228,6 +228,10 @@ class QuoteRepository:
         walk(quote.segments)
         for node in quote.forward_nodes:
             walk(node.segments)
+        # 旧 schema4 投稿可能只在 media_ids 中保留资源引用。
+        for asset_id in quote.media_ids:
+            if asset_id and asset_id not in media:
+                media[asset_id] = 1
         return images, media
 
     def _cleanup_asset_path(

@@ -16,7 +16,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 
 from .errors import SubmissionError
-from .message_service import MessageService
+from .message_service import SUBMISSION_TYPE_ERROR, MessageService
 from .models import (
     ForwardNode,
     ForwardSegment,
@@ -88,17 +88,19 @@ class QuoteService:
         source_key = self.source_key(event, message_id)
         existing = self.repository.find_source(session_key, source_key)
         if existing is not None:
-            if self.moderator is not None:
-                async with self.repository.get_store(session_key).lock:
-                    existing = self.repository.find_source(session_key, source_key)
-                    if existing is not None:
-                        pending = self._stored_review_segments(existing)
+            async with self.repository.get_store(session_key).lock:
+                existing = self.repository.find_source(session_key, source_key)
                 if existing is not None:
-                    await self.moderator.review(event, pending)
+                    self._validate_stored_submission_types(existing)
+                    if self.moderator is not None:
+                        pending = self._stored_review_segments(existing)
+            if existing is not None and self.moderator is not None:
+                await self.moderator.review(event, pending)
             if existing is not None:
                 async with self.repository.get_store(session_key).lock:
                     existing = self.repository.find_source(session_key, source_key)
                     if existing is not None:
+                        self._validate_stored_submission_types(existing)
                         self.build_quote_batches(existing)
                         return existing
         try:
@@ -142,6 +144,26 @@ class QuoteService:
                 session_key, quote, segments
             )
         return result.quote
+
+    @staticmethod
+    def _validate_stored_submission_types(quote: Quote) -> None:
+        # 重复投稿也受当前收录策略约束；检查类型时不读取或转换任何媒体。
+        def walk(segments: list[QuoteSegment | ForwardSegment], depth: int) -> None:
+            for segment in segments:
+                if segment.type in {"text", "image"}:
+                    continue
+                if segment.type != "nodes":
+                    raise SubmissionError(
+                        f"{SUBMISSION_TYPE_ERROR}；旧投稿包含 {segment.type or 'unknown'}"
+                    )
+                if depth >= 3:
+                    raise SubmissionError("合并转发超过三层，无法完整保存")
+                for node in segment.nodes:
+                    walk(node.segments, depth + 1)
+
+        walk(quote.segments, 0)
+        for node in quote.forward_nodes:
+            walk(node.segments, 1)
 
     def _stored_review_segments(self, quote: Quote) -> list[PendingForwardSegment]:
         review_images = (
